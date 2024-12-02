@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -61,9 +62,9 @@ func createNetTUN(localAddress netip.Addr) (*netTun, error) {
 	return dev, nil
 }
 
-func (net *netTun) DialContextTCP(addr netip.AddrPort) (*gonet.TCPConn, error) {
+func (net *netTun) DialContextTCP(ctx context.Context, addr netip.AddrPort) (*gonet.TCPConn, error) {
 	fa, pn := convertToFullAddr(addr)
-	return gonet.DialContextTCP(context.Background(), net.stack, fa, pn)
+	return gonet.DialContextTCP(ctx, net.stack, fa, pn)
 }
 
 func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
@@ -93,15 +94,16 @@ func (tun *netTun) WriteNotify() {
 }
 
 func (tun *netTun) Close() error {
-	tun.ep.Close()
 
-	tun.stack.Close()
 	tun.stack.RemoveNIC(1)
-
+	tun.stack.Close()
 
 	if tun.incomingPacket != nil {
 		close(tun.incomingPacket)
 	}
+
+
+	tun.ep.Close()
 
 	return nil
 }
@@ -115,9 +117,35 @@ func TestThrash(t *testing.T) {
 		t.Fatalf("Failed to create tun: %v", err)
 	}
 
-	for i := 0; i < 1000; i += 1 {
-		go tun.DialContextTCP(remoteAddr)
+	for i := 0; i < 300; i += 1 {
+		go func() {
+			ctx, cancelFunc := context.WithCancel(context.Background())
+			tun.DialContextTCP(ctx, remoteAddr)
+			cancelFunc()
+		}()
 	}
 
 	tun.Close()
 }
+
+
+func TestThrashNoConcurrency(t *testing.T) {
+	localAddr := netip.MustParseAddr("10.1.1.1")
+	remoteAddr := netip.MustParseAddrPort("10.2.2.2:111")
+
+
+	for i := 0; i < 10000; i += 1 {
+			tun, err := createNetTUN(localAddr)
+			if err != nil {
+				t.Fatalf("Failed to create tun: %v", err)
+			}
+
+			ctx := context.Background()
+			ctx, cancelFunc := context.WithTimeout(ctx, time.Millisecond)
+			go tun.DialContextTCP(ctx, remoteAddr)
+
+			cancelFunc()
+			tun.Close()
+	}
+}
+
